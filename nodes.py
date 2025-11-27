@@ -32,9 +32,45 @@ def find_flux_transformer(model):
     # Most common: model.model.diffusion_model (ComfyUI ModelPatcher structure)
     if hasattr(model, 'model'):
         if hasattr(model.model, 'diffusion_model'):
-            transformer = model.model.diffusion_model
-            if is_flux_transformer(transformer):
-                return transformer
+            flux_model = model.model.diffusion_model
+            flux_type = str(type(flux_model))
+
+            # Check if it's a ComfyUI Flux wrapper (comfy.ldm.flux.model.Flux)
+            # In this case, the actual transformer is usually in flux_model.transformer
+            if 'comfy.ldm.flux' in flux_type or 'comfy.model_base.Flux' in flux_type:
+                # The actual FluxTransformer2DModel is typically in the 'transformer' attribute
+                if hasattr(flux_model, 'transformer'):
+                    transformer = flux_model.transformer
+                    if is_flux_transformer(transformer):
+                        return transformer
+                # Also check other common locations
+                for attr_name in ['model', '_model']:
+                    if hasattr(flux_model, attr_name):
+                        inner_obj = getattr(flux_model, attr_name)
+                        if inner_obj is not None and is_flux_transformer(inner_obj):
+                            return inner_obj
+
+                # Search through all named modules/children to find the transformer
+                # ComfyUI might store it as a submodule
+                try:
+                    for name, module in flux_model.named_modules():
+                        if is_flux_transformer(module):
+                            return module
+                except (AttributeError, RuntimeError, TypeError):
+                    pass
+
+                # Also check direct children
+                try:
+                    for child in flux_model.children():
+                        if is_flux_transformer(child):
+                            return child
+                except (AttributeError, RuntimeError, TypeError):
+                    pass
+            else:
+                # Not a ComfyUI wrapper, check if it's the transformer directly
+                if is_flux_transformer(flux_model):
+                    return flux_model
+
         if hasattr(model.model, 'transformer'):
             transformer = model.model.transformer
             if is_flux_transformer(transformer):
@@ -139,13 +175,30 @@ def find_flux_transformer(model):
     # Debug: print model structure to help diagnose
     print("DEBUG: Model structure:")
     print(f"  Model type: {type(model)}")
-    print(f"  Model attributes: {[attr for attr in dir(model) if not attr.startswith('_')]}")
     if hasattr(model, 'model'):
         print(f"  model.model type: {type(model.model)}")
-        print(f"  model.model attributes: {[attr for attr in dir(model.model) if not attr.startswith('_')]}")
         if hasattr(model.model, 'diffusion_model'):
-            print(f"  model.model.diffusion_model type: {type(model.model.diffusion_model)}")
-            print(f"  Has attn_processors: {hasattr(model.model.diffusion_model, 'attn_processors')}")
+            flux_model = model.model.diffusion_model
+            flux_type = str(type(flux_model))
+            print(f"  model.model.diffusion_model type: {flux_type}")
+            print(f"  Has attn_processors: {hasattr(flux_model, 'attn_processors')}")
+
+            # Check if it's a ComfyUI Flux wrapper
+            if 'comfy.ldm.flux' in flux_type or 'comfy.model_base.Flux' in flux_type:
+                print("  Detected ComfyUI Flux wrapper - searching for transformer...")
+                # Check for transformer attribute
+                if hasattr(flux_model, 'transformer'):
+                    transformer = flux_model.transformer
+                    print(f"  Found flux_model.transformer: {type(transformer)}")
+                    print(f"  Has attn_processors: {hasattr(transformer, 'attn_processors')}")
+                    print(f"  Has set_attn_processor: {hasattr(transformer, 'set_attn_processor')}")
+                else:
+                    print("  flux_model.transformer attribute NOT FOUND")
+                    # List all attributes that might be relevant
+                    relevant_attrs = [attr for attr in dir(flux_model)
+                                    if not attr.startswith('__') and
+                                    not isinstance(getattr(flux_model, attr, None), (str, int, float, bool, list, dict, tuple))]
+                    print(f"  Relevant attributes: {relevant_attrs[:20]}")  # Show first 20
 
     return None
 
