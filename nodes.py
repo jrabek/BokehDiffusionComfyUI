@@ -13,25 +13,139 @@ MIN_BOKEH, MAX_BOKEH = 0, 30
 
 def find_flux_transformer(model):
     """Find the FLUX transformer in a ComfyUI model"""
+    # Helper function to check if an object is a FLUX transformer
+    def is_flux_transformer(obj):
+        if obj is None:
+            return False
+        obj_type = str(type(obj))
+        # Check for FluxTransformer2DModel class name
+        if 'FluxTransformer2DModel' in obj_type:
+            return True
+        # Check for attn_processors attribute (key indicator of FLUX transformer)
+        if hasattr(obj, 'attn_processors'):
+            # Additional check: FLUX transformers have set_attn_processor method
+            if hasattr(obj, 'set_attn_processor'):
+                return True
+        return False
+
     # Try different possible locations for the transformer
+    # Most common: model.model.diffusion_model (ComfyUI ModelPatcher structure)
     if hasattr(model, 'model'):
-        if hasattr(model.model, 'transformer'):
-            return model.model.transformer
-        elif hasattr(model.model, 'diffusion_model'):
-            # Check if it's a FluxTransformer2DModel
+        if hasattr(model.model, 'diffusion_model'):
             transformer = model.model.diffusion_model
-            if 'FluxTransformer2DModel' in str(type(transformer)) or hasattr(transformer, 'attn_processors'):
+            if is_flux_transformer(transformer):
                 return transformer
-    elif hasattr(model, 'diffusion_model'):
+        if hasattr(model.model, 'transformer'):
+            transformer = model.model.transformer
+            if is_flux_transformer(transformer):
+                return transformer
+        # Sometimes the model.model itself might be the transformer
+        if is_flux_transformer(model.model):
+            return model.model
+
+    # Check for private _model attribute (some wrappers use this)
+    if hasattr(model, '_model'):
+        try:
+            inner_model = model._model
+            if inner_model is not None:
+                if hasattr(inner_model, 'diffusion_model'):
+                    transformer = inner_model.diffusion_model
+                    if is_flux_transformer(transformer):
+                        return transformer
+                if hasattr(inner_model, 'transformer'):
+                    transformer = inner_model.transformer
+                    if is_flux_transformer(transformer):
+                        return transformer
+                if is_flux_transformer(inner_model):
+                    return inner_model
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+    # Check if model has a get_model() method (some ComfyUI wrappers)
+    if hasattr(model, 'get_model'):
+        try:
+            inner_model = model.get_model()
+            if inner_model is not None:
+                if hasattr(inner_model, 'diffusion_model'):
+                    transformer = inner_model.diffusion_model
+                    if is_flux_transformer(transformer):
+                        return transformer
+                if hasattr(inner_model, 'transformer'):
+                    transformer = inner_model.transformer
+                    if is_flux_transformer(transformer):
+                        return transformer
+                if is_flux_transformer(inner_model):
+                    return inner_model
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+    # Direct access: model.diffusion_model
+    if hasattr(model, 'diffusion_model'):
         transformer = model.diffusion_model
-        if 'FluxTransformer2DModel' in str(type(transformer)) or hasattr(transformer, 'attn_processors'):
+        if is_flux_transformer(transformer):
             return transformer
-    elif hasattr(model, 'transformer'):
-        return model.transformer
+
+    # Direct access: model.transformer
+    if hasattr(model, 'transformer'):
+        transformer = model.transformer
+        if is_flux_transformer(transformer):
+            return transformer
 
     # Last resort: check if model itself is the transformer
-    if hasattr(model, 'attn_processors'):
+    if is_flux_transformer(model):
         return model
+
+    # Recursive search as final fallback
+    def search_recursive(obj, depth=0, max_depth=3, visited=None):
+        if visited is None:
+            visited = set()
+        if depth > max_depth or id(obj) in visited:
+            return None
+        visited.add(id(obj))
+
+        # Check if current object is the transformer
+        if is_flux_transformer(obj):
+            return obj
+
+        # Search in common attribute names
+        for attr_name in ['diffusion_model', 'transformer', 'model', '_model']:
+            if hasattr(obj, attr_name):
+                try:
+                    attr_obj = getattr(obj, attr_name)
+                    if attr_obj is not None and id(attr_obj) not in visited:
+                        result = search_recursive(attr_obj, depth + 1, max_depth, visited)
+                        if result is not None:
+                            return result
+                except (AttributeError, RuntimeError, TypeError):
+                    continue
+
+        # Check for get_model() method
+        if hasattr(obj, 'get_model'):
+            try:
+                inner_model = obj.get_model()
+                if inner_model is not None and id(inner_model) not in visited:
+                    result = search_recursive(inner_model, depth + 1, max_depth, visited)
+                    if result is not None:
+                        return result
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+
+        return None
+
+    transformer = search_recursive(model)
+    if transformer is not None:
+        return transformer
+
+    # Debug: print model structure to help diagnose
+    print("DEBUG: Model structure:")
+    print(f"  Model type: {type(model)}")
+    print(f"  Model attributes: {[attr for attr in dir(model) if not attr.startswith('_')]}")
+    if hasattr(model, 'model'):
+        print(f"  model.model type: {type(model.model)}")
+        print(f"  model.model attributes: {[attr for attr in dir(model.model) if not attr.startswith('_')]}")
+        if hasattr(model.model, 'diffusion_model'):
+            print(f"  model.model.diffusion_model type: {type(model.model.diffusion_model)}")
+            print(f"  Has attn_processors: {hasattr(model.model.diffusion_model, 'attn_processors')}")
 
     return None
 
