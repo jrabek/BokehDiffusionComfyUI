@@ -13,7 +13,8 @@ MIN_BOKEH, MAX_BOKEH = 0, 30
 
 # Configure logging - can be controlled via BOKEH_DEBUG environment variable
 # Set BOKEH_DEBUG=1 for DEBUG level, BOKEH_DEBUG=2 for even more verbose
-_log_level = os.environ.get('BOKEH_DEBUG', '1')
+#_log_level = os.environ.get('BOKEH_DEBUG', '1')
+_log_level = '1'
 if _log_level == '2':
     logging.basicConfig(level=logging.DEBUG, format='[BokehDiffusion] %(levelname)s: %(message)s')
     logger = logging.getLogger(__name__)
@@ -125,16 +126,98 @@ def find_flux_transformer(model):
                     else:
                         logger.debug(f"      {attr_name} does not exist")
 
+                # Check visible attributes first (double_blocks, etc.)
+                logger.info("  Checking visible attributes (double_blocks, etc.)...")
+                visible_attrs_to_check = ['double_blocks', 'single_blocks', 'transformer', 'model', '_model', '_transformer', 'diffusers_model', '_diffusers_model']
+                for attr_name in visible_attrs_to_check:
+                    if hasattr(flux_model, attr_name):
+                        logger.info(f"    Checking {attr_name}...")
+                        try:
+                            attr_obj = getattr(flux_model, attr_name)
+                            logger.info(f"      {attr_name} type: {type(attr_obj)}")
+                            if attr_obj is not None:
+                                # If it's a ModuleList or similar, check items
+                                if isinstance(attr_obj, (torch.nn.ModuleList, torch.nn.ModuleDict, list, tuple)):
+                                    logger.info(f"      {attr_name} is a container with {len(attr_obj)} items")
+                                    # For double_blocks, check if any block contains a transformer
+                                    # Limit to first few items to avoid too much logging
+                                    items_to_check = min(len(attr_obj), 5) if attr_name == 'double_blocks' else len(attr_obj)
+                                    logger.info(f"      Checking first {items_to_check} items in {attr_name}...")
+                                    for i in range(items_to_check):
+                                        item = attr_obj[i]
+                                        logger.debug(f"        Checking {attr_name}[{i}]: {type(item)}")
+                                        # Check item itself
+                                        if is_flux_transformer(item, f"{attr_name}[{i}]"):
+                                            logger.info(f"      ✓ FOUND TRANSFORMER in {attr_name}[{i}]!")
+                                            return item
+                                        # Check if the item has a transformer attribute
+                                        if hasattr(item, 'transformer'):
+                                            nested = getattr(item, 'transformer')
+                                            logger.debug(f"        {attr_name}[{i}].transformer exists: {type(nested)}")
+                                            if is_flux_transformer(nested, f"{attr_name}[{i}].transformer"):
+                                                logger.info(f"      ✓ FOUND TRANSFORMER in {attr_name}[{i}].transformer!")
+                                                return nested
+                                        # Check item's attributes for transformer-like objects
+                                        if hasattr(item, '__dict__'):
+                                            for sub_key, sub_value in item.__dict__.items():
+                                                if sub_value is not None and not isinstance(sub_value, (str, int, float, bool, list, dict, tuple)):
+                                                    if 'transformer' in sub_key.lower() or 'flux' in str(type(sub_value)).lower():
+                                                        logger.debug(f"        {attr_name}[{i}].{sub_key}: {type(sub_value)}")
+                                                        if is_flux_transformer(sub_value, f"{attr_name}[{i}].{sub_key}"):
+                                                            logger.info(f"      ✓ FOUND TRANSFORMER in {attr_name}[{i}].{sub_key}!")
+                                                            return sub_value
+                                else:
+                                    if is_flux_transformer(attr_obj, f"flux_model.{attr_name}"):
+                                        logger.info(f"      ✓ FOUND TRANSFORMER in {attr_name}!")
+                                        return attr_obj
+                        except Exception as e:
+                            logger.debug(f"      Error checking {attr_name}: {e}")
+
+                # Check if ComfyUI Flux model has the diffusers model stored somewhere
+                # Sometimes it's in __dict__ or accessible via specific methods
+                logger.info("  Checking for diffusers model in __dict__ or state_dict keys...")
+                try:
+                    if hasattr(flux_model, '__dict__'):
+                        for key, value in flux_model.__dict__.items():
+                            if value is not None and not isinstance(value, (str, int, float, bool, list, dict, tuple)):
+                                value_type = str(type(value))
+                                if 'diffusers' in value_type.lower() or 'FluxTransformer' in value_type:
+                                    logger.info(f"    Found potential diffusers model in __dict__[{key}]: {value_type}")
+                                    if is_flux_transformer(value, f"__dict__[{key}]"):
+                                        logger.info(f"    ✓ FOUND TRANSFORMER in __dict__[{key}]!")
+                                        return value
+                except Exception as e:
+                    logger.debug(f"    Error checking __dict__: {e}")
+
+                # Check state_dict keys for hints about transformer structure
+                try:
+                    if hasattr(flux_model, 'state_dict'):
+                        state_keys = list(flux_model.state_dict().keys())[:30]  # First 30 keys
+                        logger.info(f"    Sample state_dict keys (first 30): {state_keys}")
+                        # Look for transformer-related keys
+                        transformer_keys = [k for k in state_keys if 'transformer' in k.lower() or 'attn' in k.lower()]
+                        if transformer_keys:
+                            logger.info(f"    Found transformer-related keys: {transformer_keys[:10]}")
+                except Exception as e:
+                    logger.debug(f"    Error checking state_dict: {e}")
+
                 # Search through all named modules/children to find the transformer
                 # ComfyUI might store it as a submodule
                 logger.info("  Searching through named_modules...")
                 transformer_candidates = []
                 attn_processor_candidates = []
+                interesting_modules = []  # Track interesting module types
                 try:
                     module_count = 0
                     for name, module in flux_model.named_modules():
                         module_count += 1
                         module_type = str(type(module))
+                        module_class_name = type(module).__name__
+
+                        # Track interesting module types for debugging
+                        if module_count <= 50 or 'transformer' in name.lower() or 'flux' in module_class_name.lower():
+                            interesting_modules.append((name, module_class_name, module_type))
+
                         # Check if it's a FluxTransformer2DModel
                         if 'FluxTransformer2DModel' in module_type:
                             logger.debug(f"    Found FluxTransformer2DModel candidate: {name}")
@@ -153,6 +236,12 @@ def find_flux_transformer(model):
                     logger.info(f"  Searched {module_count} modules total")
                     logger.info(f"  Found {len(transformer_candidates)} FluxTransformer2DModel candidates")
                     logger.info(f"  Found {len(attn_processor_candidates)} attn_processor candidates")
+
+                    # Log interesting modules for debugging
+                    if interesting_modules:
+                        logger.info("  Sample of interesting modules (first 50 or transformer/flux related):")
+                        for name, class_name, mod_type in interesting_modules[:30]:
+                            logger.info(f"    {name}: {class_name}")
 
                     # Print candidate modules for debugging
                     if transformer_candidates:
