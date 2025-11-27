@@ -730,6 +730,34 @@ class BokehKSampler:
 
     @classmethod
     def INPUT_TYPES(cls):
+        # Try to import ComfyUI's sampler constants
+        try:
+            import comfy.samplers
+            # Get sampler and scheduler names from ComfyUI
+            # First try KSampler class attributes (most reliable)
+            sampler_names = ["euler"]  # Default fallback
+            scheduler_names = ["normal"]  # Default fallback
+
+            if hasattr(comfy.samplers, 'KSampler'):
+                ksampler_class = comfy.samplers.KSampler
+                if hasattr(ksampler_class, 'SAMPLERS') and isinstance(ksampler_class.SAMPLERS, (list, tuple)):
+                    sampler_names = list(ksampler_class.SAMPLERS)
+                if hasattr(ksampler_class, 'SCHEDULERS') and isinstance(ksampler_class.SCHEDULERS, (list, tuple)):
+                    scheduler_names = list(ksampler_class.SCHEDULERS)
+
+            # Fallback to module-level constants if class attributes not found
+            if sampler_names == ["euler"] and hasattr(comfy.samplers, 'KSAMPLER_NAMES'):
+                sampler_names = list(comfy.samplers.KSAMPLER_NAMES)
+            if scheduler_names == ["normal"] and hasattr(comfy.samplers, 'SCHEDULER_NAMES'):
+                scheduler_names = list(comfy.samplers.SCHEDULER_NAMES)
+
+            logger.debug(f"Loaded {len(sampler_names)} samplers and {len(scheduler_names)} schedulers from ComfyUI")
+        except (ImportError, AttributeError) as e:
+            # Fallback if ComfyUI is not available or constants missing
+            logger.warning(f"Could not load ComfyUI sampler constants: {e}. Using fallback lists.")
+            sampler_names = ["euler", "euler_ancestral", "heun", "dpm_2", "dpm_2_ancestral", "lms", "dpm_fast", "dpm_adaptive", "dpmpp_2s_ancestral", "dpmpp_sde", "dpmpp_2m", "dpmpp_2m_sde", "ddpm", "lcm"]
+            scheduler_names = ["beta", "karras", "exponential", "sgm_uniform", "simple", "ddim_uniform"]
+
         return {
             "required": {
                 "model": ("MODEL",),
@@ -739,8 +767,8 @@ class BokehKSampler:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "steps": ("INT", {"default": 30, "min": 1, "max": 10000}),
                 "cfg": ("FLOAT", {"default": 3.0, "min": 0.0, "max": 100.0, "step": 0.1}),
-                "sampler_name": ("STRING", {"default": "euler"}),
-                "scheduler": ("STRING", {"default": "normal"}),
+                "sampler_name": (sampler_names, {"default": sampler_names[0] if sampler_names else "euler"}),
+                "scheduler": (scheduler_names, {"default": scheduler_names[0] if scheduler_names else "beta"}),
                 "bokeh_control": ("BOKEH_CONTROL",),
             },
             "optional": {
